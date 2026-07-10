@@ -652,13 +652,9 @@ def render_result(inputs: CurrentInputs, result: ScheduleResult) -> None:
     st.divider()
     st.subheader("分组结果")
 
-    max_play_streak = max(stat.max_play_streak for stat in result.stats)
-
-    metric_a, metric_b, metric_c, metric_d = st.columns(4)
-    metric_a.metric("总局数", len(result.matches))
-    metric_b.metric("上场次数差", result.appearance_gap)
-    metric_c.metric("最长连续上场", f"{max_play_streak} 局")
-    metric_d.metric("同一搭档最多", f"{result.max_partner_times} 次")
+    # 分组结果首页只保留总局数，其余公平性统计放入“个人统计”页。
+    total_rounds_col, _ = st.columns([1, 3])
+    total_rounds_col.metric("总局数", len(result.matches))
 
     st.markdown(
         f'<div class="summary-box">{html.escape(summary_text(inputs, result))}</div>',
@@ -671,6 +667,14 @@ def render_result(inputs: CurrentInputs, result: ScheduleResult) -> None:
         render_schedule_tab(inputs, result)
 
     with stats_tab:
+        max_play_streak = max(stat.max_play_streak for stat in result.stats)
+
+        metric_a, metric_b, metric_c = st.columns(3)
+        metric_a.metric("上场次数差", result.appearance_gap)
+        metric_b.metric("最长连续上场", f"{max_play_streak} 局")
+        metric_c.metric("同一搭档最多", f"{result.max_partner_times} 次")
+
+        st.write("")
         render_stats_tab(result)
 
     st.write("")
