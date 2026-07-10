@@ -55,6 +55,7 @@ def initialize_state() -> None:
     st.session_state.setdefault("schedule_result", None)
     st.session_state.setdefault("schedule_signature", None)
     st.session_state.setdefault("last_seed", None)
+    st.session_state.setdefault("show_success_toast", False)
 
     for index in range(MAX_PLAYERS):
         st.session_state.setdefault(f"player_name_{index}", f"球员{index + 1}")
@@ -304,6 +305,20 @@ def inject_styles() -> None:
             font-weight: 720;
         }
 
+        /* 生成成功提示：半透明、轻微磨砂，2 秒后由 Streamlit 自动关闭。 */
+        [data-testid="stToast"] {
+            background: rgba(23, 32, 51, 0.86) !important;
+            border: 1px solid rgba(255, 255, 255, 0.18) !important;
+            border-radius: 14px !important;
+            box-shadow: 0 12px 34px rgba(15, 23, 42, 0.24) !important;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+        }
+
+        [data-testid="stToast"] * {
+            color: #ffffff !important;
+        }
+
         footer {
             visibility: hidden;
         }
@@ -501,6 +516,19 @@ def generate_from_inputs(inputs: CurrentInputs) -> None:
     st.session_state["schedule_result"] = result
     st.session_state["schedule_signature"] = inputs.signature
     st.session_state["last_seed"] = seed
+    st.session_state["show_success_toast"] = True
+
+
+def show_success_toast_if_needed() -> None:
+    """生成成功后显示一次提示，并在 2 秒后自动关闭。"""
+
+    if st.session_state.get("show_success_toast", False):
+        st.toast(
+            "生成成功，请下拉页面查看结果",
+            icon="✅",
+            duration=2,
+        )
+        st.session_state["show_success_toast"] = False
 
 
 def summary_text(inputs: CurrentInputs, result: ScheduleResult) -> str:
@@ -684,6 +712,7 @@ def main() -> None:
     initialize_state()
     inject_styles()
     render_header()
+    show_success_toast_if_needed()
 
     player_count, mode, rounds, exclude = render_settings()
     players = render_player_inputs(player_count)
