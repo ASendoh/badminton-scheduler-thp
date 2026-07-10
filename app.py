@@ -579,42 +579,45 @@ def render_schedule_tab(inputs: CurrentInputs, result: ScheduleResult) -> None:
 
 
 def render_stats_tab(result: ScheduleResult) -> None:
+    """显示个人统计。
+
+    HTML 必须连续拼接，不能在相邻卡片之间保留带缩进的空行；
+    否则 Markdown 解析器可能把后续卡片误识别成代码块。
+    """
+
     cards: list[str] = []
 
     for stat in result.stats:
-        cards.append(
-            f"""
-            <div class="stat-card">
-                <div class="stat-name">
-                    {html.escape(stat.name)}
-                    <span class="gender-chip">{html.escape(stat.gender)}</span>
-                </div>
-                <div class="stat-values">
-                    <div class="stat-item">
-                        <strong>{stat.appearances}</strong>
-                        上场次数
-                    </div>
-                    <div class="stat-item">
-                        <strong>{stat.rests}</strong>
-                        休息次数
-                    </div>
-                    <div class="stat-item">
-                        <strong>{stat.max_play_streak}</strong>
-                        连续上场
-                    </div>
-                    <div class="stat-item">
-                        <strong>{stat.max_rest_streak}</strong>
-                        连续休息
-                    </div>
-                </div>
-            </div>
-            """
+        card_html = (
+            '<div class="stat-card">'
+            '<div class="stat-name">'
+            f'{html.escape(stat.name)}'
+            f'<span class="gender-chip">{html.escape(stat.gender)}</span>'
+            '</div>'
+            '<div class="stat-values">'
+            '<div class="stat-item">'
+            f'<strong>{stat.appearances}</strong>'
+            '上场次数'
+            '</div>'
+            '<div class="stat-item">'
+            f'<strong>{stat.rests}</strong>'
+            '休息次数'
+            '</div>'
+            '<div class="stat-item">'
+            f'<strong>{stat.max_play_streak}</strong>'
+            '连续上场'
+            '</div>'
+            '<div class="stat-item">'
+            f'<strong>{stat.max_rest_streak}</strong>'
+            '连续休息'
+            '</div>'
+            '</div>'
+            '</div>'
         )
+        cards.append(card_html)
 
-    st.markdown(
-        '<div class="stats-grid">' + "".join(cards) + "</div>",
-        unsafe_allow_html=True,
-    )
+    stats_html = '<div class="stats-grid">' + "".join(cards) + "</div>"
+    st.markdown(stats_html, unsafe_allow_html=True)
 
 
 def render_result(inputs: CurrentInputs, result: ScheduleResult) -> None:
