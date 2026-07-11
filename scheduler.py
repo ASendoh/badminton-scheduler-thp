@@ -96,9 +96,14 @@ def generate_schedule(
     rounds: int,
     seed: int | None = None,
     exclude_male_vs_female: bool = False,
+    fixed_partner: tuple[int, int] | None = None,
 ) -> ScheduleResult:
-    """按完整公平周期生成赛程，并将多个周期依次拼接。"""
-    _validate_basic_input(players, mode, rounds)
+    """按完整公平周期生成赛程，并将多个周期依次拼接。
+
+    fixed_partner 使用两名球员的索引。启用后，两人始终同上同下，
+    且只要上场就必须组成同一支队伍。
+    """
+    _validate_basic_input(players, mode, rounds, fixed_partner)
 
     cycle_length = fair_cycle_rounds(len(players), mode)
     if rounds % cycle_length != 0:
@@ -120,6 +125,7 @@ def generate_schedule(
             rounds=cycle_length,
             rng=rng,
             exclude_male_vs_female=exclude_male_vs_female,
+            fixed_partner=fixed_partner,
         )
 
         # 从循环移位和倒序方案中选择与上一周期衔接更自然的一种，
@@ -156,6 +162,7 @@ def _generate_one_cycle(
     rounds: int,
     rng: random.Random,
     exclude_male_vs_female: bool,
+    fixed_partner: tuple[int, int] | None,
 ) -> tuple[list[Match], float]:
     """生成单个完整公平周期。"""
     targets = _build_targets(players, mode, rounds, rng)
@@ -163,6 +170,7 @@ def _generate_one_cycle(
         players,
         mode,
         exclude_male_vs_female=exclude_male_vs_female,
+        fixed_partner=fixed_partner,
     )
     if not candidates:
         raise SchedulingError("当前性别构成和排除规则下没有可用对阵。")
@@ -406,7 +414,12 @@ def _count_partners(matches: list[Match]) -> dict[tuple[int, int], int]:
     return counts
 
 
-def _validate_basic_input(players: list[Player], mode: str, rounds: int) -> None:
+def _validate_basic_input(
+    players: list[Player],
+    mode: str,
+    rounds: int,
+    fixed_partner: tuple[int, int] | None,
+) -> None:
     player_count = len(players)
     if player_count not in (5, 6, 7, 8):
         raise SchedulingError("参与人数只能是 5、6、7 或 8 人。")
@@ -426,6 +439,51 @@ def _validate_basic_input(players: list[Player], mode: str, rounds: int) -> None
 
     if any(player.gender not in ("男", "女") for player in players):
         raise SchedulingError("性别只能选择“男”或“女”。")
+
+    _validate_fixed_partner(players, mode, fixed_partner)
+
+
+def _validate_fixed_partner(
+    players: list[Player],
+    mode: str,
+    fixed_partner: tuple[int, int] | None,
+) -> None:
+    if fixed_partner is None:
+        return
+
+    if (
+        not isinstance(fixed_partner, tuple)
+        or len(fixed_partner) != 2
+        or any(not isinstance(index, int) for index in fixed_partner)
+    ):
+        raise SchedulingError("固定搭档参数无效。")
+
+    player_a, player_b = fixed_partner
+    player_count = len(players)
+
+    if player_a == player_b:
+        raise SchedulingError("固定搭档必须选择两名不同的球员。")
+
+    if not (0 <= player_a < player_count and 0 <= player_b < player_count):
+        raise SchedulingError("固定搭档球员不在当前名单中。")
+
+    # 5 人每局只有 1 人休息，无法让两名固定搭档同时休息，
+    # 因而无法同时满足“同上同下”和每人上场次数公平。
+    if player_count == 5:
+        raise SchedulingError(
+            "5 人模式每局只有 1 人休息，无法设置同上同下的固定搭档。"
+        )
+
+    if mode == MODE_MIXED:
+        if players[player_a].gender == players[player_b].gender:
+            raise SchedulingError("混双轮转中的固定搭档必须是一男一女。")
+
+        # 7 人混双的两个性别组人数不同。要让跨性别固定搭档同上同下，
+        # 必然使整体上场次数差超过当前规则允许的 1 次。
+        if player_count == 7:
+            raise SchedulingError(
+                "7 人混双无法在保持上场次数差不超过 1 的同时设置固定搭档。"
+            )
 
 
 def _build_targets(
@@ -503,6 +561,7 @@ def _build_candidates(
     players: list[Player],
     mode: str,
     exclude_male_vs_female: bool = False,
+    fixed_partner: tuple[int, int] | None = None,
 ) -> list[Match]:
     candidates: list[Match] = []
 
@@ -521,6 +580,8 @@ def _build_candidates(
                     and _is_male_doubles_vs_female_doubles(players, match)
                 ):
                     continue
+                if not _respects_fixed_partner(match, fixed_partner):
+                    continue
                 candidates.append(match)
 
         return candidates
@@ -530,14 +591,40 @@ def _build_candidates(
 
     for man_a, man_b in combinations(men, 2):
         for woman_a, woman_b in combinations(women, 2):
+            mixed_matches = [
+                Match((man_a, woman_a), (man_b, woman_b)),
+                Match((man_a, woman_b), (man_b, woman_a)),
+            ]
             candidates.extend(
-                [
-                    Match((man_a, woman_a), (man_b, woman_b)),
-                    Match((man_a, woman_b), (man_b, woman_a)),
-                ]
+                match
+                for match in mixed_matches
+                if _respects_fixed_partner(match, fixed_partner)
             )
 
     return candidates
+
+
+def _respects_fixed_partner(
+    match: Match,
+    fixed_partner: tuple[int, int] | None,
+) -> bool:
+    """固定搭档要么同时休息，要么作为同一队同时上场。"""
+    if fixed_partner is None:
+        return True
+
+    player_a, player_b = fixed_partner
+    participants = set(match.participants)
+    a_plays = player_a in participants
+    b_plays = player_b in participants
+
+    if a_plays != b_plays:
+        return False
+
+    if not a_plays:
+        return True
+
+    fixed_team = {player_a, player_b}
+    return set(match.team_a) == fixed_team or set(match.team_b) == fixed_team
 
 
 def _is_male_doubles_vs_female_doubles(

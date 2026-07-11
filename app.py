@@ -47,6 +47,7 @@ class CurrentInputs:
     mode: str
     rounds: int
     exclude_male_vs_female: bool
+    fixed_partner: tuple[int, int] | None
 
     @property
     def signature(self) -> tuple[object, ...]:
@@ -55,6 +56,7 @@ class CurrentInputs:
             self.mode,
             self.rounds,
             self.exclude_male_vs_female,
+            self.fixed_partner,
             tuple((player.name, player.gender) for player in self.players),
         )
 
@@ -68,6 +70,9 @@ def initialize_state() -> None:
     st.session_state.setdefault("schedule_signature", None)
     st.session_state.setdefault("last_seed", None)
     st.session_state.setdefault("show_success_toast", False)
+    st.session_state.setdefault("fixed_partner_enabled", False)
+    st.session_state.setdefault("fixed_partner_a", 0)
+    st.session_state.setdefault("fixed_partner_b", 1)
 
     for index in range(MAX_PLAYERS):
         st.session_state.setdefault(f"player_name_{index}", f"球员{index + 1}")
@@ -479,7 +484,98 @@ def render_settings() -> tuple[int, str, int, bool]:
     return player_count, mode, rounds, exclude
 
 
-def render_player_inputs(player_count: int) -> list[Player]:
+def _fixed_partner_supported(player_count: int, mode: str) -> tuple[bool, str]:
+    if player_count == 5:
+        return (
+            False,
+            "5 人模式每局只有 1 人休息，无法让两名固定搭档同上同下。",
+        )
+
+    if mode == MODE_MIXED and player_count == 7:
+        return (
+            False,
+            "7 人混双的男女组人数不同，设置固定搭档会使上场次数差超过 1。",
+        )
+
+    return True, ""
+
+
+def render_fixed_partner_setting(
+    players: list[Player],
+    mode: str,
+) -> tuple[int, int] | None:
+    player_count = len(players)
+    supported, unsupported_reason = _fixed_partner_supported(player_count, mode)
+
+    # 人数变化后，先修正旧索引，避免 selectbox 出现无效值。
+    if not 0 <= int(st.session_state.get("fixed_partner_a", 0)) < player_count:
+        st.session_state["fixed_partner_a"] = 0
+    if not 0 <= int(st.session_state.get("fixed_partner_b", 1)) < player_count:
+        st.session_state["fixed_partner_b"] = 1
+
+    if not supported:
+        st.session_state["fixed_partner_enabled"] = False
+
+    with st.expander(
+        "设置固定搭档（可选）",
+        expanded=bool(st.session_state.get("fixed_partner_enabled", False)),
+    ):
+        enabled = st.checkbox(
+            "启用固定搭档",
+            key="fixed_partner_enabled",
+            disabled=not supported,
+            help="固定搭档始终同上同下，且上场时必须组成同一支队伍。",
+        )
+
+        if not supported:
+            st.info(unsupported_reason)
+            return None
+
+        if not enabled:
+            st.caption("启用后可选择两名球员；两人会始终同上同下并固定组队。")
+            return None
+
+        def player_label(index: int) -> str:
+            name = players[index].name.strip() or f"球员{index + 1}"
+            return f"{index + 1}. {name}（{players[index].gender}）"
+
+        first_index = st.selectbox(
+            "固定搭档成员 1",
+            options=list(range(player_count)),
+            key="fixed_partner_a",
+            format_func=player_label,
+        )
+
+        second_options = [
+            index for index in range(player_count) if index != first_index
+        ]
+        if st.session_state.get("fixed_partner_b") not in second_options:
+            st.session_state["fixed_partner_b"] = second_options[0]
+
+        second_index = st.selectbox(
+            "固定搭档成员 2",
+            options=second_options,
+            key="fixed_partner_b",
+            format_func=player_label,
+        )
+
+        if mode == MODE_MIXED and (
+            players[first_index].gender == players[second_index].gender
+        ):
+            st.warning("混双轮转中的固定搭档必须选择一男一女。")
+        else:
+            st.success(
+                f"已设置：{players[first_index].name or f'球员{first_index + 1}'} "
+                f"+ {players[second_index].name or f'球员{second_index + 1}'}"
+            )
+
+        return (first_index, second_index)
+
+
+def render_player_inputs(
+    player_count: int,
+    mode: str,
+) -> tuple[list[Player], tuple[int, int] | None]:
     st.markdown(
         """
         <div class="section-card">
@@ -510,7 +606,8 @@ def render_player_inputs(player_count: int) -> list[Player]:
 
         players.append(Player(name=name.strip(), gender=gender))
 
-    return players
+    fixed_partner = render_fixed_partner_setting(players, mode)
+    return players, fixed_partner
 
 
 def generate_from_inputs(inputs: CurrentInputs) -> None:
@@ -523,6 +620,7 @@ def generate_from_inputs(inputs: CurrentInputs) -> None:
             rounds=inputs.rounds,
             seed=seed,
             exclude_male_vs_female=inputs.exclude_male_vs_female,
+            fixed_partner=inputs.fixed_partner,
         )
 
     try:
@@ -539,7 +637,18 @@ def generate_from_inputs(inputs: CurrentInputs) -> None:
                     }
                     for player in inputs.players
                 ],
-                "app_version": "web-v1.4",
+                "fixed_partner": (
+                    [
+                        {
+                            "name": inputs.players[index].name,
+                            "gender": inputs.players[index].gender,
+                        }
+                        for index in inputs.fixed_partner
+                    ]
+                    if inputs.fixed_partner is not None
+                    else None
+                ),
+                "app_version": "web-v1.5",
             }
         )
     except (DatabaseConfigurationError, DatabaseOperationError) as exc:
@@ -579,11 +688,20 @@ def summary_text(inputs: CurrentInputs, result: ScheduleResult) -> str:
         else ""
     )
 
+    fixed_partner_text = ""
+    if inputs.fixed_partner is not None:
+        player_a, player_b = inputs.fixed_partner
+        fixed_partner_text = (
+            f"；固定搭档：{inputs.players[player_a].name} "
+            f"+ {inputs.players[player_b].name}"
+        )
+
     return (
         f"共 {result.cycle_count} 个公平周期（每周期 {result.cycle_length} 局）；"
         f"{fairness}；最长连续上场 {max_play_streak} 局；"
         f"最长连续休息 {max_rest_streak} 局；"
-        f"同一搭档最多合作 {result.max_partner_times} 次{exclusion}。"
+        f"同一搭档最多合作 {result.max_partner_times} 次"
+        f"{exclusion}{fixed_partner_text}。"
     )
 
 
@@ -793,6 +911,18 @@ def player_text(players: object) -> str:
     return "、".join(items)
 
 
+def fixed_partner_text(value: object) -> str:
+    if not isinstance(value, list):
+        return "未设置"
+
+    names = [
+        str(item.get("name", "")).strip()
+        for item in value
+        if isinstance(item, dict) and str(item.get("name", "")).strip()
+    ]
+    return " + ".join(names) if len(names) == 2 else "未设置"
+
+
 def records_to_rows(records: list[dict[str, object]]) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
 
@@ -812,6 +942,7 @@ def records_to_rows(records: list[dict[str, object]]) -> list[dict[str, object]]
                     else "否"
                 ),
                 "球员姓名与性别": player_text(record.get("players")),
+                "固定搭档": fixed_partner_text(record.get("fixed_partner")),
             }
         )
 
@@ -851,7 +982,10 @@ def render_admin_login(expected_password: str) -> None:
 
 def render_admin_dashboard() -> None:
     st.title("管理员后台")
-    st.caption("仅记录用户生成分组时提交的比赛设置、姓名和性别，不保存对阵结果。")
+    st.caption(
+        "仅记录用户生成分组时提交的比赛设置、姓名、性别和固定搭档设置，"
+        "不保存对阵结果。"
+    )
 
     header_left, header_right = st.columns([3, 1])
     with header_right:
@@ -970,7 +1104,7 @@ def main() -> None:
     show_success_toast_if_needed()
 
     player_count, mode, rounds, exclude = render_settings()
-    players = render_player_inputs(player_count)
+    players, fixed_partner = render_player_inputs(player_count, mode)
 
     inputs = CurrentInputs(
         players=players,
@@ -978,6 +1112,7 @@ def main() -> None:
         mode=mode,
         rounds=rounds,
         exclude_male_vs_female=exclude,
+        fixed_partner=fixed_partner,
     )
 
     st.write("")

@@ -13,8 +13,14 @@ create table if not exists public.usage_records (
     exclude_male_vs_female boolean not null default false,
     players jsonb not null
         check (jsonb_typeof(players) = 'array'),
-    app_version text not null default 'web-v1.4'
+    fixed_partner jsonb null
+        check (fixed_partner is null or jsonb_typeof(fixed_partner) = 'array'),
+    app_version text not null default 'web-v1.5'
 );
+
+-- 已部署过旧版时，下面语句会补上固定搭档字段。
+alter table public.usage_records
+    add column if not exists fixed_partner jsonb null;
 
 create index if not exists usage_records_created_at_idx
     on public.usage_records (created_at desc);
