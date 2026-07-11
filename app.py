@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import csv
+import hashlib
+import hmac
 import html
+import io
 import secrets
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from database import (
+    DatabaseConfigurationError,
+    DatabaseOperationError,
+    fetch_usage_records,
+    save_usage_record,
+)
 from scheduler import (
     MODE_MIXED,
     MODE_RANDOM,
@@ -513,6 +525,27 @@ def generate_from_inputs(inputs: CurrentInputs) -> None:
             exclude_male_vs_female=inputs.exclude_male_vs_female,
         )
 
+    try:
+        save_usage_record(
+            {
+                "player_count": inputs.player_count,
+                "mode": inputs.mode,
+                "rounds": inputs.rounds,
+                "exclude_male_vs_female": inputs.exclude_male_vs_female,
+                "players": [
+                    {
+                        "name": player.name,
+                        "gender": player.gender,
+                    }
+                    for player in inputs.players
+                ],
+                "app_version": "web-v1.4",
+            }
+        )
+    except (DatabaseConfigurationError, DatabaseOperationError) as exc:
+        # 普通使用页面保持不变；数据库异常只写入云端运行日志。
+        print(f"[usage-log] 保存失败：{exc}")
+
     st.session_state["schedule_result"] = result
     st.session_state["schedule_signature"] = inputs.signature
     st.session_state["last_seed"] = seed
@@ -705,6 +738,219 @@ def render_result(inputs: CurrentInputs, result: ScheduleResult) -> None:
             st.rerun()
 
 
+
+def is_admin_route() -> bool:
+    """通过 ?admin=1 进入不在普通页面显示的管理员后台。"""
+
+    return st.query_params.get("admin") == "1"
+
+
+def get_admin_password() -> str:
+    try:
+        password = str(st.secrets["admin"]["password"])
+    except (FileNotFoundError, KeyError, TypeError):
+        return ""
+    return password
+
+
+def verify_admin_password(candidate: str, expected: str) -> bool:
+    """使用固定长度摘要进行比较，避免直接比较密码字符串。"""
+
+    candidate_digest = hashlib.sha256(candidate.encode("utf-8")).digest()
+    expected_digest = hashlib.sha256(expected.encode("utf-8")).digest()
+    return hmac.compare_digest(candidate_digest, expected_digest)
+
+
+def format_beijing_time(value: object) -> str:
+    if not value:
+        return ""
+
+    try:
+        raw = str(value).replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+        return parsed.astimezone(ZoneInfo("Asia/Shanghai")).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def player_text(players: object) -> str:
+    if not isinstance(players, list):
+        return ""
+
+    items: list[str] = []
+    for player in players:
+        if not isinstance(player, dict):
+            continue
+        name = str(player.get("name", "")).strip()
+        gender = str(player.get("gender", "")).strip()
+        if name:
+            items.append(f"{name}（{gender}）" if gender else name)
+
+    return "、".join(items)
+
+
+def records_to_rows(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+
+    for record in records:
+        mode = str(record.get("mode", ""))
+        rows.append(
+            {
+                "记录时间（北京时间）": format_beijing_time(
+                    record.get("created_at")
+                ),
+                "参与人数": record.get("player_count", ""),
+                "比赛模式": MODE_LABELS.get(mode, mode),
+                "比赛局数": record.get("rounds", ""),
+                "排除男双vs女双": (
+                    "是"
+                    if bool(record.get("exclude_male_vs_female", False))
+                    else "否"
+                ),
+                "球员姓名与性别": player_text(record.get("players")),
+            }
+        )
+
+    return rows
+
+
+def rows_to_csv(rows: list[dict[str, object]]) -> bytes:
+    if not rows:
+        return b""
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue().encode("utf-8-sig")
+
+
+def render_admin_login(expected_password: str) -> None:
+    st.title("管理员后台")
+    st.caption("请输入管理员密码查看用户提交的球员信息。")
+
+    with st.form("admin_login_form"):
+        password = st.text_input("管理员密码", type="password")
+        submitted = st.form_submit_button(
+            "登录",
+            type="primary",
+            width="stretch",
+        )
+
+    if submitted:
+        if verify_admin_password(password, expected_password):
+            st.session_state["admin_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("密码错误。")
+
+
+def render_admin_dashboard() -> None:
+    st.title("管理员后台")
+    st.caption("仅记录用户生成分组时提交的比赛设置、姓名和性别，不保存对阵结果。")
+
+    header_left, header_right = st.columns([3, 1])
+    with header_right:
+        if st.button("退出后台", width="stretch"):
+            st.session_state["admin_authenticated"] = False
+            st.rerun()
+
+    try:
+        records = fetch_usage_records(limit=1000)
+    except DatabaseConfigurationError as exc:
+        st.error(f"数据库尚未配置：{exc}")
+        return
+    except DatabaseOperationError as exc:
+        st.error(f"读取数据库失败：{exc}")
+        return
+
+    rows = records_to_rows(records)
+
+    today = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d")
+    today_count = sum(
+        1
+        for row in rows
+        if str(row["记录时间（北京时间）"]).startswith(today)
+    )
+    total_players = sum(
+        int(record.get("player_count", 0) or 0)
+        for record in records
+    )
+
+    metric_a, metric_b, metric_c = st.columns(3)
+    metric_a.metric("记录总数", len(rows))
+    metric_b.metric("今日记录", today_count)
+    metric_c.metric("累计提交球员", total_players)
+
+    filter_name, filter_mode = st.columns([2, 1])
+    with filter_name:
+        keyword = st.text_input(
+            "按球员姓名筛选",
+            placeholder="输入姓名中的任意文字",
+        ).strip()
+    with filter_mode:
+        selected_mode = st.selectbox(
+            "按模式筛选",
+            options=["全部", "随机大乱斗", "混双轮转"],
+        )
+
+    filtered_rows = rows
+    if keyword:
+        filtered_rows = [
+            row
+            for row in filtered_rows
+            if keyword.casefold()
+            in str(row["球员姓名与性别"]).casefold()
+        ]
+
+    if selected_mode != "全部":
+        filtered_rows = [
+            row
+            for row in filtered_rows
+            if row["比赛模式"] == selected_mode
+        ]
+
+    st.caption(f"当前显示 {len(filtered_rows)} 条，后台最多读取最近 1000 条记录。")
+    st.dataframe(
+        filtered_rows,
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.download_button(
+        "导出当前记录 CSV",
+        data=rows_to_csv(filtered_rows),
+        file_name=(
+            "badminton_usage_"
+            + datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S")
+            + ".csv"
+        ),
+        mime="text/csv",
+        width="stretch",
+        disabled=not filtered_rows,
+    )
+
+
+def render_admin_page() -> None:
+    expected_password = get_admin_password()
+
+    if not expected_password:
+        st.error(
+            "管理员密码尚未配置。请在 Streamlit Secrets 中设置 "
+            '[admin]\\npassword = "你的管理员密码"'
+        )
+        return
+
+    if not st.session_state.get("admin_authenticated", False):
+        render_admin_login(expected_password)
+        return
+
+    render_admin_dashboard()
+
 def main() -> None:
     st.set_page_config(
         page_title=APP_TITLE,
@@ -715,6 +961,11 @@ def main() -> None:
 
     initialize_state()
     inject_styles()
+
+    if is_admin_route():
+        render_admin_page()
+        return
+
     render_header()
     show_success_toast_if_needed()
 
